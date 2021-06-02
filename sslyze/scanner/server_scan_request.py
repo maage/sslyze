@@ -3,6 +3,7 @@ from enum import Enum
 from traceback import TracebackException
 from typing import Set, Optional, List
 
+from sslyze import ServerNetworkConfiguration
 from sslyze.plugins.elliptic_curves_plugin import SupportedEllipticCurvesScanResult
 
 
@@ -21,7 +22,8 @@ from sslyze.plugins.session_resumption.implementation import (
     SessionResumptionSupportScanResult,
     SessionResumptionSupportExtraArgument,
 )
-from sslyze.server_connectivity import ServerConnectivityInfo
+from sslyze.server_connectivity import ServerConnectivityInfo, ServerTlsProbingResult
+from sslyze.server_setting import ServerNetworkLocation
 
 
 @dataclass(frozen=True)
@@ -35,8 +37,10 @@ class ScanCommandsExtraArguments:
 class ServerScanRequest:
     """A request to scan a specific server with the supplied scan commands.
     """
+    # TODO: Use ServerNetworkConfiguration.default_for_server_location(server_location) in the doc
+    server_location: ServerNetworkLocation
+    network_configuration: ServerNetworkConfiguration
 
-    server_info: ServerConnectivityInfo
     scan_commands: Set[ScanCommand]
     scan_commands_extra_arguments: ScanCommandsExtraArguments = field(default_factory=ScanCommandsExtraArguments)
 
@@ -100,37 +104,45 @@ class ScanCommandError:
 
 @dataclass(frozen=True)
 class ServerScanResult:
-    """The result of a ServerScanRequest that was completed by a Scanner.
-    """
-
-    # What was passed in the corresponding ServerScanRequest
-    server_info: ServerConnectivityInfo
-    scan_commands: Set[ScanCommand]
-    scan_commands_extra_arguments: ScanCommandsExtraArguments
-
+    tls_probing_result: ServerTlsProbingResult  # Initial connectivity testing
     scan_commands_results: ScanCommandsResults
     scan_commands_errors: List[ScanCommandError]  # Empty if no errors occurred
 
-    def __post_init__(self) -> None:
-        # Ensure that the extra arguments match the scan commands
-        for class_field in fields(self.scan_commands_extra_arguments):
-            scan_command = class_field.name
-            if (
-                getattr(self.scan_commands_extra_arguments, scan_command, None)
-                and scan_command not in self.scan_commands
-            ):
-                raise ValueError(f"Received an extra argument for a scan command that wasn't enabled: {scan_command}")
 
+@dataclass(frozen=True)
+class ConnectivityError:
+    exception_trace: TracebackException
+
+
+@dataclass(frozen=True)
+class ServerScanResponse:
+    """The result of a ServerScanRequest that was completed by a Scanner.
+
+    One of the two fields, connectivity_error and result, will be None depending on whether SSLyze was able to connect
+    to the server and scan it, or not.
+
+    Attributes:
+        request: The request that was initially passed to start the scan of this server.
+        connectivity_error: Set if SSLyze was not able to connect to the server and scan it; None otherwise.
+        result: Set if SSLyze was able to connect to the server and scan it. None if SSLyze encountered a connectivity
+            error.
+    """
+    request: ServerScanRequest
+
+    connectivity_error: Optional[ConnectivityError]
+    result: Optional[ServerScanResult]
+
+    def __post_init__(self) -> None:
         # Ensure that all requested scan commands returned either a result or an error
         scan_commands_with_results_or_errors = set()
-        for class_field in fields(self.scan_commands_results):
+        for class_field in fields(self.result.scan_commands_results):
             scan_command = class_field.name
-            if getattr(self.scan_commands_results, scan_command, None):
+            if getattr(self.result.scan_commands_results, scan_command, None):
                 scan_commands_with_results_or_errors.add(scan_command)
 
-        for scan_command in [error.scan_command for error in self.scan_commands_errors]:
+        for scan_command in [error.scan_command for error in self.result.scan_commands_errors]:
             scan_commands_with_results_or_errors.add(scan_command)
 
-        missing_scan_commands = self.scan_commands.difference(scan_commands_with_results_or_errors)
+        missing_scan_commands = self.request.scan_commands.difference(scan_commands_with_results_or_errors)
         if missing_scan_commands:
             raise ValueError(f"Missing error or result for scan commands: {missing_scan_commands}")

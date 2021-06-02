@@ -54,9 +54,6 @@ class ServerTlsProbingResult:
 class ServerConnectivityInfo:
     """All the settings (hostname, port, SSL version, etc.) needed to successfully connect to a given SSL/TLS server.
 
-    Such objects should never be instantiated directly and are instead returned by `ServerConnectivityTester.perform()`
-    when connectivity testing was successful.
-
     Attributes:
         server_location: The minimum information needed to establish a connection to the server.
         network_configuration: Some additional configuration regarding how to connect to the server.
@@ -336,13 +333,16 @@ def _detect_ecdh_support(
     return is_ecdh_key_exchange_supported
 
 
+# TODO: Switch to a function; rename to tls_probe_something
 class ServerConnectivityTester:
     """Utility class to ensure that SSLyze is able to connect to a server before scanning it.
     """
 
     def perform(
-        self, server_location: ServerNetworkLocation, network_configuration: Optional[ServerNetworkConfiguration] = None
-    ) -> ServerConnectivityInfo:
+        self,
+        server_location: ServerNetworkLocation,
+        network_configuration: ServerNetworkConfiguration
+    ) -> ServerTlsProbingResult:
         """Attempt to perform a full SSL/TLS handshake with the server.
 
         This method will ensure that the server can be reached, and will also identify one SSL/TLS version and one
@@ -353,24 +353,18 @@ class ServerConnectivityTester:
             network_configuration
 
         Returns:
-            An object encapsulating all the information needed to connect to the server, to be passed to a `Scanner` in
-            order to run scan commands against the server.
+            ServerTlsProbingResult
 
         Raises:
             ServerConnectivityError: If the server was not reachable or an SSL/TLS handshake could not be completed.
         """
-        if network_configuration is None:
-            final_network_config = ServerNetworkConfiguration.default_for_server_location(server_location)
-        else:
-            final_network_config = network_configuration
-
         # Try to complete an SSL handshake to figure out the SSL/TLS version and cipher supported by the server
         tls_detection_result: Optional[_TlsVersionDetectionResult] = None
 
         # Fist try TLS 1.3
         try:
             tls_detection_result = _detect_support_for_tls_1_3(
-                server_location=server_location, network_config=final_network_config,
+                server_location=server_location, network_config=network_configuration,
             )
         except _TlsVersionNotSupported:
             pass
@@ -386,7 +380,7 @@ class ServerConnectivityTester:
             ]:
                 try:
                     tls_detection_result = _detect_support_for_tls_1_2_or_below(
-                        server_location=server_location, network_config=final_network_config, tls_version=tls_version,
+                        server_location=server_location, network_config=network_configuration, tls_version=tls_version,
                     )
                     break
                 except _TlsVersionNotSupported:
@@ -396,7 +390,7 @@ class ServerConnectivityTester:
         if tls_detection_result is None:
             raise ServerTlsConfigurationNotSupported(
                 server_location=server_location,
-                network_configuration=final_network_config,
+                network_configuration=network_configuration,
                 error_message="Probing failed: could not find a TLS version and cipher suite supported by the server",
             )
 
@@ -405,12 +399,12 @@ class ServerConnectivityTester:
         if tls_detection_result.server_requested_client_cert:
             if tls_detection_result.tls_version_supported.value >= TlsVersionEnum.TLS_1_3.value:
                 client_auth_requirement = _detect_client_auth_requirement_with_tls_1_3(
-                    server_location=server_location, network_config=final_network_config,
+                    server_location=server_location, network_config=network_configuration,
                 )
             else:
                 client_auth_requirement = _detect_client_auth_requirement_with_tls_1_2_or_below(
                     server_location=server_location,
-                    network_config=final_network_config,
+                    network_config=network_configuration,
                     tls_version=tls_detection_result.tls_version_supported,
                     cipher_list=tls_detection_result.cipher_suite_supported,
                 )
@@ -421,22 +415,16 @@ class ServerConnectivityTester:
         else:
             is_ecdh_key_exchange_supported = _detect_ecdh_support(
                 server_location=server_location,
-                network_config=final_network_config,
+                network_config=network_configuration,
                 tls_version=tls_detection_result.tls_version_supported,
             )
 
         # All done with TLS probing
-        tls_probing_result = ServerTlsProbingResult(
+        return ServerTlsProbingResult(
             highest_tls_version_supported=tls_detection_result.tls_version_supported,
             cipher_suite_supported=tls_detection_result.cipher_suite_supported,
             client_auth_requirement=client_auth_requirement,
             supports_ecdh_key_exchange=is_ecdh_key_exchange_supported,
-        )
-
-        return ServerConnectivityInfo(
-            server_location=server_location,
-            network_configuration=final_network_config,
-            tls_probing_result=tls_probing_result,
         )
 
 

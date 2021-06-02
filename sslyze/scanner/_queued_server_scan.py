@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from nassl.ssl_client import ClientCertificateRequested
 
+from sslyze import ServerConnectivityInfo, ServerTlsProbingResult
 from sslyze.errors import ConnectionToServerTimedOut, TlsHandshakeTimedOut
 from sslyze.plugins.plugin_base import ScanCommandWrongUsageError, ScanJob, ScanJobResult, ScanCommandResult
 from sslyze.plugins.scan_commands import ScanCommandsRepository, ScanCommand
@@ -17,8 +18,14 @@ from sslyze.scanner.server_scan_request import (
     ServerScanResult,
     ScanCommandError,
     ScanCommandErrorReasonEnum,
-    ScanCommandsResults,
+    ScanCommandsResults, ServerScanResponse,
 )
+
+
+@dataclass(frozen=True)
+class ReachableServerScanRequest:
+    server_scan_request: ServerScanRequest
+    tls_probing_result: ServerTlsProbingResult
 
 
 @dataclass(frozen=True)
@@ -35,7 +42,7 @@ class _QueuedServerScan:
         return self.queued_scan_jobs_count == len(self.completed_scan_jobs)
 
 
-class NoMoreServerScansSentinel:
+class NoMoreServerScanRequestsSentinel:
     pass
 
 
@@ -43,7 +50,7 @@ class ProducerThread(threading.Thread):
     """Thread to continuously process more scans and the corresponding jobs as previous ones get completed.
 
     The goal is to reduce memory usage, by only generating objects related to a single server scan (ScanJob, etc.) when
-    the scan is ongoing, instead of generating all objects for all scans at the very beginning.
+    the scan is ongoing, instead of generating al\l objects for all scans at the very beginning.
     The previous implementation used ThreadPoolExecutor and took a lot memory because it did just that:
     https://github.com/nabla-c0d3/sslyze/issues/511
     """
@@ -52,12 +59,12 @@ class ProducerThread(threading.Thread):
         self,
         concurrent_server_scans_count: int,
         per_server_concurrent_connections_count: int,
-        queued_server_scan_requests: List[ServerScanRequest],
-        server_scan_results_queue: "queue.Queue[ServerScanResult]",
+        reachable_server_scan_requests_queue_in: "queue.Queue[ReachableServerScanRequest]",
+        server_scan_responses_queue_out: "queue.Queue[ServerScanResponse]",
     ):
         super().__init__()
-        self._server_scan_results_queue = server_scan_results_queue
-        self._queued_server_scan_requests = queued_server_scan_requests
+        self._server_scan_responses_queue_out = server_scan_responses_queue_out
+        self._reachable_server_scan_requests_queue_in = reachable_server_scan_requests_queue_in
         self.daemon = True  # Shutdown the thread if the program is exiting early (ie. ctrl+c)
 
         # Create internal threads and queues for dispatching jobs
@@ -70,7 +77,7 @@ class ProducerThread(threading.Thread):
         for worker_queue in self._all_worker_queues:
             self._all_worker_threads.extend(
                 [
-                    WorkerThread(incoming_jobs_queue=worker_queue, completed_jobs_queue=self._completed_jobs_queue)
+                    WorkerThread(jobs_queue_in=worker_queue, completed_jobs_queue_out=self._completed_jobs_queue)
                     for _ in range(self._worker_threads_per_queues_count)
                 ]
             )
@@ -113,7 +120,7 @@ class ProducerThread(threading.Thread):
                 # All done with this scan: generate and send the results
                 del all_ongoing_server_scans[completed_server_scan.uuid]
                 server_scan_result = _generate_result_for_completed_server_scan(completed_server_scan)
-                self._server_scan_results_queue.put(server_scan_result)
+                self._server_scan_results_queue_out.put(server_scan_result)
 
                 # Then start the next server scan on the same queue
                 try:
@@ -138,8 +145,8 @@ class ProducerThread(threading.Thread):
         for worker_thread in self._all_worker_threads:
             worker_thread.join()
 
-        self._server_scan_results_queue.put(NoMoreServerScansSentinel())  # type: ignore
-        self._server_scan_results_queue.join()
+        self._server_scan_results_queue_out.put(NoMoreServerScanRequestsSentinel())  # type: ignore
+        self._server_scan_results_queue_out.join()
 
 
 def _queue_server_scan(
