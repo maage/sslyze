@@ -1,3 +1,4 @@
+import collections
 from pathlib import Path
 from typing import cast, TextIO, Optional
 
@@ -70,7 +71,7 @@ class ConsoleOutputGenerator(OutputGenerator):
         network_route = _server_location_to_network_route(server_location)
 
         # Display result for scan commands that were run successfully
-        for scan_command, scan_command_result in server_scan_result.scan_commands_results.items():
+        for scan_command, scan_command_result in collections.OrderedDict(sorted(server_scan_result.scan_commands_results.items())).items():
             typed_scan_command = cast(ScanCommandType, scan_command)
             target_result_str += "\n"
             cli_connector_cls = ScanCommandsRepository.get_implementation_cls(typed_scan_command).cli_connector_cls
@@ -78,7 +79,7 @@ class ConsoleOutputGenerator(OutputGenerator):
                 target_result_str += line + "\n"
 
         # Display scan commands that failed
-        for scan_command, scan_command_error in server_scan_result.scan_commands_errors.items():
+        for scan_command, scan_command_error in collections.OrderedDict(sorted(server_scan_result.scan_commands_errors.items())).items():
             target_result_str += "\n"
             cli_connector_cls = ScanCommandsRepository.get_implementation_cls(scan_command).cli_connector_cls
 
